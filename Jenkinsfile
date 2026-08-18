@@ -21,10 +21,14 @@
 // AWS provider and the AWS CLI both read automatically.
 //
 // State: local backend (terraform.tfstate in the Jenkins workspace - see
-// main.tf for why). Destroying the bucket, if ever needed, is a manual
-// 'terraform destroy' run from this same workspace - intentionally not
-// wired into the pipeline, since an automatic destroy trigger is exactly
-// the kind of thing that should require a human to run on purpose.
+// main.tf for why).
+//
+// Teardown: destroying the bucket is deliberately NOT automatic. Set the
+// DESTROY build parameter to true (and run on 'main') to tear it down -
+// when DESTROY is true, every normal stage is skipped and only the
+// 'Terraform Destroy' stage runs, so a teardown run never accidentally
+// re-applies first. Leaving DESTROY at its default (false) keeps the
+// pipeline behaving exactly as before.
 
 pipeline {
     agent { label 'local-agent-1' }
@@ -32,6 +36,10 @@ pipeline {
     options {
         timestamps()
         timeout(time: 20, unit: 'MINUTES')
+    }
+
+    parameters {
+        booleanParam(name: 'DESTROY', defaultValue: false, description: 'If true, skip the normal init/validate/plan/apply flow and run terraform destroy instead (main branch only).')
     }
 
     stages {
@@ -42,6 +50,9 @@ pipeline {
         }
 
         stage('Resolve Environment') {
+            when {
+                expression { !params.DESTROY }
+            }
             steps {
                 script {
                     def envMap = [
@@ -56,18 +67,27 @@ pipeline {
         }
 
         stage('Terraform Init') {
+            when {
+                expression { !params.DESTROY }
+            }
             steps {
                 bat 'terraform init -input=false'
             }
         }
 
         stage('Terraform Validate') {
+            when {
+                expression { !params.DESTROY }
+            }
             steps {
                 bat 'terraform validate'
             }
         }
 
         stage('Terraform Plan') {
+            when {
+                expression { !params.DESTROY }
+            }
             steps {
                 withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-cred']]) {
                     bat "terraform plan -input=false -var=\"environment=${env.DEPLOY_ENV}\" -out=tfplan"
@@ -77,12 +97,30 @@ pipeline {
 
         stage('Terraform Apply') {
             when {
-                branch 'main'
+                allOf {
+                    branch 'main'
+                    expression { !params.DESTROY }
+                }
             }
             steps {
                 withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-cred']]) {
                     bat 'terraform apply -input=false -auto-approve tfplan'
                     bat 'terraform output'
+                }
+            }
+        }
+
+        stage('Terraform Destroy') {
+            when {
+                allOf {
+                    branch 'main'
+                    expression { params.DESTROY }
+                }
+            }
+            steps {
+                withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-cred']]) {
+                    bat 'terraform init -input=false'
+                    bat 'terraform destroy -input=false -auto-approve'
                 }
             }
         }
