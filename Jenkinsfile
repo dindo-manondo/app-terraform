@@ -13,13 +13,12 @@
 // defaultEnv branch gating used by the other apps in this org, just
 // simplified to a single environment since there's only one bucket.
 //
-// Credentials: requires a Jenkins credential with ID 'aws-cred', kind
-// "Username with password", where the username is an AWS Access Key ID
-// and the password is the matching AWS Secret Access Key. Terraform's AWS
-// provider (and the AWS CLI) both read AWS_ACCESS_KEY_ID /
-// AWS_SECRET_ACCESS_KEY from the environment automatically, so no
-// provider-specific credentials config is needed beyond withCredentials()
-// setting those two env vars for the duration of each AWS-calling stage.
+// Credentials: uses the existing Jenkins credential 'aws-cred' (kind "AWS
+// Credentials", from the AWS Credentials plugin). The
+// AmazonWebServicesCredentialsBinding class exports AWS_ACCESS_KEY_ID /
+// AWS_SECRET_ACCESS_KEY (and AWS_SESSION_TOKEN, if the credential has one)
+// as env vars for the duration of each AWS-calling stage, which Terraform's
+// AWS provider and the AWS CLI both read automatically.
 //
 // State: local backend (terraform.tfstate in the Jenkins workspace - see
 // main.tf for why). Destroying the bucket, if ever needed, is a manual
@@ -28,73 +27,73 @@
 // the kind of thing that should require a human to run on purpose.
 
 pipeline {
-      agent { label 'local-agent-1' }
+    agent { label 'local-agent-1' }
 
-      options {
-                timestamps()
-                timeout(time: 20, unit: 'MINUTES')
-      }
+    options {
+        timestamps()
+        timeout(time: 20, unit: 'MINUTES')
+    }
 
-      stages {
-                stage('Checkout') {
-                              steps {
-                                                checkout scm
-                              }
-                }
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
 
-                stage('Resolve Environment') {
-                              steps {
-                                                script {
-                                                                      def envMap = [
-                                                                                                'main': 'prod',
-                                                                                                'release/*': 'staging',
-                                                                                                'develop': 'dev'
-                                                                                            ]
-                                                                      env.DEPLOY_ENV = envMap[env.BRANCH_NAME] ?: 'dev'
-                                                                      echo "Branch '${env.BRANCH_NAME}' -> environment '${env.DEPLOY_ENV}'"
-                                                }
-                              }
+        stage('Resolve Environment') {
+            steps {
+                script {
+                    def envMap = [
+                        'main': 'prod',
+                        'release/*': 'staging',
+                        'develop': 'dev'
+                    ]
+                    env.DEPLOY_ENV = envMap[env.BRANCH_NAME] ?: 'dev'
+                    echo "Branch '${env.BRANCH_NAME}' -> environment '${env.DEPLOY_ENV}'"
                 }
+            }
+        }
 
-                stage('Terraform Init') {
-                              steps {
-                                                bat 'terraform init -input=false'
-                              }
-                }
+        stage('Terraform Init') {
+            steps {
+                bat 'terraform init -input=false'
+            }
+        }
 
-                stage('Terraform Validate') {
-                              steps {
-                                                bat 'terraform validate'
-                              }
-                }
+        stage('Terraform Validate') {
+            steps {
+                bat 'terraform validate'
+            }
+        }
 
-                stage('Terraform Plan') {
-                              steps {
-                                                withCredentials([usernamePassword(credentialsId: 'aws-cred', usernameVariable: 'AWS_ACCESS_KEY_ID', passwordVariable: 'AWS_SECRET_ACCESS_KEY')]) {
-                                                                      bat "terraform plan -input=false -var=\"environment=${env.DEPLOY_ENV}\" -out=tfplan"
-                                                }
-                              }
+        stage('Terraform Plan') {
+            steps {
+                withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-cred']]) {
+                    bat "terraform plan -input=false -var=\"environment=${env.DEPLOY_ENV}\" -out=tfplan"
                 }
+            }
+        }
 
-                stage('Terraform Apply') {
-                              when {
-                                                branch 'main'
-                              }
-                              steps {
-                                                withCredentials([usernamePassword(credentialsId: 'aws-cred', usernameVariable: 'AWS_ACCESS_KEY_ID', passwordVariable: 'AWS_SECRET_ACCESS_KEY')]) {
-                                                                      bat 'terraform apply -input=false -auto-approve tfplan'
-                                                                      bat 'terraform output'
-                                                }
-                              }
+        stage('Terraform Apply') {
+            when {
+                branch 'main'
+            }
+            steps {
+                withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-cred']]) {
+                    bat 'terraform apply -input=false -auto-approve tfplan'
+                    bat 'terraform output'
                 }
-      }
+            }
+        }
+    }
 
-      post {
-                success {
-                              echo "app-terraform: pipeline completed successfully."
-                }
-                failure {
-                              echo "app-terraform: pipeline FAILED - check console output above."
-                }
-      }
+    post {
+        success {
+            echo "app-terraform: pipeline completed successfully."
+        }
+        failure {
+            echo "app-terraform: pipeline FAILED - check console output above."
+        }
+    }
 }
